@@ -18,12 +18,12 @@ using boost::asio::co_spawn;
 using boost::asio::detached;
 using boost::asio::dynamic_buffer;
 using boost::asio::io_service;
-using boost::asio::transfer_exactly;
 using boost::asio::use_awaitable;
 using boost::asio::ip::tcp;
 using boost::system::error_code;
 
 constexpr std::string_view delimiter = "\r\n\r\n";
+constexpr size_t CHUNK_SIZE = 65536;
 
 awaitable<void> session(tcp::socket client_socket, io_service &io_service) {
     try {
@@ -67,20 +67,46 @@ awaitable<void> session(tcp::socket client_socket, io_service &io_service) {
                     client_socket, buffer(response_buf.data() + resp_headers_size, already_have), use_awaitable);
             }
 
+            std::string chunk(CHUNK_SIZE, '\0');
+            while (true) {
+                auto [read_ec, n] =
+                    co_await server_socket.async_read_some(buffer(chunk), boost::asio::as_tuple(use_awaitable));
+
+                if (n > 0) {
+                    auto [write_ec, _] = co_await boost::asio::async_write(client_socket, buffer(chunk.data(), n),
+                                                                           boost::asio::as_tuple(use_awaitable));
+
+                    if (write_ec) {
+                        break;
+                    }
+                }
+
+                if (read_ec) {
+                    break;
+                }
+            }
+
             std::println("Response with no Content-Length successfully sent to client {}:{}", client_addr, client_port);
             co_return;
         }
 
-        size_t total_needed = resp_headers_size + content_length_opt.value();
-        size_t already_have = response_buf.size();
+        size_t content_length = content_length_opt.value();
+        size_t already_buffered = response_buf.size() - resp_headers_size;
 
-        if (already_have < total_needed) {
-            co_await boost::asio::async_read(server_socket, dynamic_buffer(response_buf),
-                                             transfer_exactly(total_needed - already_have), use_awaitable);
+        if (already_buffered > 0) {
+            co_await boost::asio::async_write(
+                client_socket, buffer(response_buf.data() + resp_headers_size, already_buffered), use_awaitable);
         }
 
-        co_await boost::asio::async_write(
-            client_socket, buffer(response_buf.data() + resp_headers_size, content_length_opt.value()), use_awaitable);
+        std::string chunk(CHUNK_SIZE, '\0');
+        size_t remaining = content_length - already_buffered;
+
+        while (remaining > 0) {
+            size_t to_read = std::min(remaining, CHUNK_SIZE);
+            size_t n = co_await server_socket.async_read_some(buffer(chunk.data(), to_read), use_awaitable);
+            co_await boost::asio::async_write(client_socket, buffer(chunk.data(), n), use_awaitable);
+            remaining -= n;
+        }
 
         std::println("Response successfully sent to client {}:{}", client_addr, client_port);
     } catch (const std::exception &e) {

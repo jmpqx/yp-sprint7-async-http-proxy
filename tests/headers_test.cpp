@@ -1,6 +1,7 @@
 #include "headers.h"
 #include <gtest/gtest.h>
 
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,27 @@ TEST(findHostPort, NoHost) {
     EXPECT_THROW(findHostPort("GET / HTTP/1.1\r\nContent-Length: 42\r\n\r\n"), std::runtime_error);
 }
 
+TEST(findHostPort, DifferentHostHeaderRegisters) {
+    auto [host, port] = findHostPort("GET / HTTP/1.1\r\n"
+                                     "host: example.com:8080\r\n"
+                                     "\r\n");
+    EXPECT_EQ(host, "example.com");
+    EXPECT_EQ(port, "8080");
+
+    auto [host2, port2] = findHostPort("GET / HTTP/1.1\r\n"
+                                       "hOsT: example.com\r\n"
+                                       "\r\n");
+    EXPECT_EQ(host2, "example.com");
+    EXPECT_EQ(port2, "80");
+}
+
+TEST(findHostPort, InvalidPort) {
+    EXPECT_THROW(findHostPort("GET / HTTP/1.1\r\n"
+                              "host: example.com:8q0q\r\n"
+                              "\r\n"),
+                 std::runtime_error);
+}
+
 TEST(findContentLength, Simple) {
     auto result = findContentLength("HTTP/1.1 200 OK\r\n"
                                     "Content-Length: 1234\r\n"
@@ -86,4 +108,24 @@ TEST(findContentLength, NoContentLength) {
                                     "Transfer-Encoding: chunked\r\n"
                                     "\r\n");
     EXPECT_FALSE(result.has_value());
+}
+
+TEST(findContentLength, DifferentContentLengthHeaderRegisters) {
+    auto result = findContentLength("HTTP/1.1 200 OK\r\n"
+                                    "Content-Length: 1234\r\n"
+                                    "\r\n");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), 1234u);
+
+    result = findContentLength("HTTP/1.1 200 OK\r\n"
+                               "content-length: 1234\r\n"
+                               "\r\n");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), 1234u);
+
+    result = findContentLength("HTTP/1.1 200 OK\r\n"
+                               "conTenT-lEngTH: 1234\r\n"
+                               "\r\n");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), 1234u);
 }
